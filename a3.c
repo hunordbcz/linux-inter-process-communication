@@ -24,30 +24,28 @@ typedef enum {
     REQ_NOT_FOUND
 } REQUEST_ENUM;
 
-typedef struct {
-    unsigned int offset;
-    unsigned int size;
-} SECTION, *pSECTION;
-
 typedef union {
     u_int32_t value;
     unsigned char byte[4];
 } UNSIGNED_INT;
 
 typedef union {
-    u_int16_t value;
-    unsigned char byte[2];
-} SHORT;
-
-typedef union {
     u_int8_t value;
     unsigned char byte[1];
 } BYTE;
 
+typedef struct {
+    unsigned int offset;
+    unsigned int size;
+} SECTION, *pSECTION;
+
+typedef struct {
+    char *pointer;
+    u_long size;
+} MAPPED_FILE, *pMAPPED_FILE;
+
 int fdRead, fdWrite;
-char *mappedFile = NULL;
-u_long mappedFileSize = -1;
-int fileD;
+pMAPPED_FILE pMappedFile = NULL;
 
 void makePipeBasedConnection(char *response, char *request);
 
@@ -67,15 +65,21 @@ int createSharedMemory(unsigned int bytes);
 
 int writeToSharedMemory(unsigned int value, unsigned int offset);
 
-char *mapFile(char *path);
+int mapFile(char *path);
 
-int readFromFileOffset(char *file, unsigned int noOfBytes, unsigned int offset);
+int readFromFileOffset(unsigned int noOfBytes, unsigned int offset);
 
-int readFromSection(char *file, unsigned int nrOfBytes, unsigned int offset, unsigned int sectionNr);
+int readFromSection(unsigned int nrOfBytes, unsigned int offset, unsigned int sectionNr);
 
-int readFromLogicalSpaceOffset(char *file, unsigned int nrOfBytes, unsigned int logicalOffset);
+int readFromLogicalSpaceOffset(unsigned int nrOfBytes, unsigned int logicalOffset);
 
-SECTION getSection(char *file, int nr);
+SECTION getSection(unsigned int nr);
+
+int writeStringToSHM(unsigned char *value, unsigned int offset);
+
+int getSharedMemory(char *key);
+
+int getFileDescriptor(char *path);
 
 int main() {
     makePipeBasedConnection("RESP_PIPE_82417", "REQ_PIPE_82417");
@@ -111,7 +115,7 @@ int processRequest(char *request) {
             break;
         case REQ_MAP_FILE:
             writeString("MAP_FILE");
-            if ((mappedFile = mapFile(readString())) == NULL) {
+            if (mapFile(readString()) == EXIT_FAILURE) {
                 writeString("ERROR");
             } else {
                 writeString("SUCCESS");
@@ -119,7 +123,7 @@ int processRequest(char *request) {
             break;
         case REQ_READ_FROM_FILE_OFFSET:
             writeString("READ_FROM_FILE_OFFSET");
-            if (readFromFileOffset(mappedFile, readNumber(), readNumber()) == EXIT_FAILURE) {
+            if (readFromFileOffset(readNumber(), readNumber()) == EXIT_FAILURE) {
                 writeString("ERROR");
             } else {
                 writeString("SUCCESS");
@@ -127,7 +131,7 @@ int processRequest(char *request) {
             break;
         case REQ_READ_FROM_FILE_SECTION:
             writeString("READ_FROM_FILE_SECTION");
-            if (readFromSection(mappedFile, readNumber(), readNumber(), readNumber()) == EXIT_FAILURE) {
+            if (readFromSection(readNumber(), readNumber(), readNumber()) == EXIT_FAILURE) {
                 writeString("ERROR");
             } else {
                 writeString("SUCCESS");
@@ -135,159 +139,151 @@ int processRequest(char *request) {
             break;
         case REQ_READ_FROM_LOGICAL_SPACE_OFFSET:
             writeString("READ_FROM_LOGICAL_SPACE_OFFSET");
-            if (readFromLogicalSpaceOffset(mappedFile, readNumber(), readNumber()) == EXIT_FAILURE) {
+            if (readFromLogicalSpaceOffset(readNumber(), readNumber()) == EXIT_FAILURE) {
                 writeString("ERROR");
             } else {
                 writeString("SUCCESS");
             }
             break;
         case REQ_NOT_FOUND:
+            perror("Request not found in processRequest()");
+            exit(-1);
         default:
+            if (pMappedFile != NULL) {
+                free(pMappedFile);
+            }
             return REQ_EXIT;
     }
     return 1;
 }
 
-int readFromLogicalSpaceOffset(char *file, unsigned int nrOfBytes, unsigned int logicalOffset) {
-    printf("NR BYTES: %d\n", nrOfBytes);
+int readFromLogicalSpaceOffset(unsigned int nrOfBytes, unsigned int logicalOffset) {
     BYTE noOfSections;
-    memcpy(noOfSections.byte, file + 8, 1);
+    memcpy(noOfSections.byte, pMappedFile->pointer + 8, 1);
     unsigned int currentOffset = 0;
 
-
     for (int i = 0; i < noOfSections.value; i++) {
-        SECTION section = getSection(file, i);
+        SECTION section = getSection(i);
         if (section.size + currentOffset < logicalOffset) {
             currentOffset += section.size;
             if (currentOffset % 3072 != 0) {
                 currentOffset += 3072 - currentOffset % 3072;
             }
-
-            printf("CurrentOffset: %d --- SectionSize: %d\n", currentOffset, section.size);
         } else {
-            char response[nrOfBytes + 1];
-            memcpy(response, file + section.offset + (logicalOffset - currentOffset), nrOfBytes);
-            int shm_id = shm_open(SHM_NAME, O_RDWR, 0644);
-            if (shm_id < 0) {
-                perror("Cannot open the shared memory at readFromFileOffset()");
-                exit(-1);
-            }
+            unsigned char response[nrOfBytes + 1];
+            memcpy(response, pMappedFile->pointer + section.offset + (logicalOffset - currentOffset), nrOfBytes);
 
-            lseek(shm_id, 0, SEEK_SET);
-            write(shm_id, response, sizeof(response));
-            return EXIT_SUCCESS;
+            return writeStringToSHM(response, 0);
         }
     }
     return EXIT_FAILURE;
 }
 
-SECTION getSection(char *file, int nr) {
+SECTION getSection(unsigned int nr) {
     SECTION result;
-    int sectionOffsetPos = BODY_HEADER_SIZE + nr * SECTION_HEADER_SIZE + 18;
-    int sectionSizePos = BODY_HEADER_SIZE + nr * SECTION_HEADER_SIZE + 22;
     UNSIGNED_INT size;
     UNSIGNED_INT offset;
-    memcpy(size.byte, file + sectionSizePos, 4);
-    memcpy(offset.byte, file + sectionOffsetPos, 4);
+    int sectionOffsetPos = BODY_HEADER_SIZE + nr * SECTION_HEADER_SIZE + 18;
+    int sectionSizePos = BODY_HEADER_SIZE + nr * SECTION_HEADER_SIZE + 22;
+
+    memcpy(size.byte, pMappedFile->pointer + sectionSizePos, 4);
+    memcpy(offset.byte, pMappedFile->pointer + sectionOffsetPos, 4);
+
     result.size = size.value;
     result.offset = offset.value;
     return result;
 }
 
-int readFromSection(char *file, unsigned int nrOfBytes, unsigned int offset, unsigned int sectionNr) {
-    //check section numbers
+int readFromSection(unsigned int nrOfBytes, unsigned int offset, unsigned int sectionNr) {
     BYTE noOfSections;
-    memcpy(noOfSections.byte, file + 8, 1);
+    memcpy(noOfSections.byte, pMappedFile->pointer + 8, 1);
     if (noOfSections.value < sectionNr) {
         return EXIT_FAILURE;
     }
 
-    int sectionOffsetPos = BODY_HEADER_SIZE + (sectionNr - 1) * SECTION_HEADER_SIZE + 18;
-    int sectionSizePos = BODY_HEADER_SIZE + (sectionNr - 1) * SECTION_HEADER_SIZE + 22;
+    SECTION section = getSection(sectionNr - 1);
+    unsigned char response[nrOfBytes + 1];
+    memcpy(response, pMappedFile->pointer + section.offset + offset, nrOfBytes);
 
-    UNSIGNED_INT sectSize;
-    memcpy(sectSize.byte, file + sectionSizePos, 4);
-    if (sectSize.value < nrOfBytes + offset) {
-        return EXIT_FAILURE;
-    }
-
-    UNSIGNED_INT sectOffset;
-    memcpy(sectOffset.byte, file + sectionOffsetPos, 4);
-
-    char response[nrOfBytes + 1];
-    memcpy(response, file + sectOffset.value + offset, nrOfBytes);
-    int shm_id = shm_open(SHM_NAME, O_RDWR, 0644);
-    if (shm_id < 0) {
-        perror("Cannot open the shared memory at readFromFileOffset()");
-        exit(-1);
-    }
-
-    lseek(shm_id, 0, SEEK_SET);
-    write(shm_id, response, sizeof(response));
-    return EXIT_SUCCESS;
+    return writeStringToSHM(response, 0);
 }
 
-int readFromFileOffset(char *file, unsigned int noOfBytes, unsigned int offset) {
-    if (mappedFileSize < (offset + noOfBytes)) {
+int readFromFileOffset(unsigned int noOfBytes, unsigned int offset) {
+    printf("SIZE: %lu \t OFFSET: %d\tNoOfBytes: %d\n", pMappedFile->size, noOfBytes, offset);
+    if (pMappedFile->size < (offset + noOfBytes)) {
         return EXIT_FAILURE;
     }
+    printf("TEST\n\n");
+    unsigned char response[noOfBytes + 1];
 
-    char response[noOfBytes + 1];
-    memcpy(response, file + offset, noOfBytes);
+    memcpy(response, pMappedFile->pointer + offset, noOfBytes);
     response[noOfBytes] = '\0';
 
-    int shm_id = shm_open(SHM_NAME, O_RDWR, 0644);
-    if (shm_id < 0) {
-        perror("Cannot open the shared memory at readFromFileOffset()");
-        exit(-1);
+    return writeStringToSHM(response, 0);
+}
+
+int mapFile(char *path) {
+    int fileDescriptor;
+    if ((fileDescriptor = getFileDescriptor(path)) == -1) {
+        return EXIT_FAILURE;
     }
 
-    lseek(shm_id, 0, SEEK_SET);
-    write(shm_id, response, sizeof(response));
+    int size = lseek(fileDescriptor, 0, SEEK_END);
+    lseek(fileDescriptor, 0, SEEK_SET);
 
+    char *data = NULL;
+    data = (char *) mmap(NULL, size, PROT_READ, MAP_SHARED, fileDescriptor, 0);
+    if (data == MAP_FAILED) {
+        return EXIT_FAILURE;
+    }
+
+    pMappedFile = (pMAPPED_FILE) malloc(sizeof(MAPPED_FILE));
+    pMappedFile->size = size;
+    pMappedFile->pointer = data;
     return EXIT_SUCCESS;
 }
 
-char *mapFile(char *path) {
+int getFileDescriptor(char *path) {
+    int fileD = -1;
+
     if (access(path, R_OK) == -1) {
         chmod(path, S_IRUSR | S_IRGRP | S_IROTH);
     }
     if ((fileD = open(path, O_RDONLY, 0644)) < 0) {
-        return NULL;
+        return -1;
     }
-    struct stat st;
-    fstat(fileD, &st);
-    int size = st.st_size;
-    lseek(fileD, 0, SEEK_SET);
 
-    char *data = NULL;
-    data = (char *) mmap(NULL, size, PROT_READ, MAP_SHARED, fileD, 0);
-    if (data == MAP_FAILED) {
-        return NULL;
+    return fileD;
+}
+
+int writeStringToSHM(unsigned char *value, unsigned int offset) {
+    printf("%s\n", value);
+    int shm_id = getSharedMemory(SHM_NAME);
+
+    int sizeSHM = lseek(shm_id, 0, SEEK_END);
+    int sizeValue = strlen((char *) value);
+    if (sizeSHM >= offset + sizeValue) {
+
+        lseek(shm_id, offset, SEEK_SET);
+        write(shm_id, value, sizeValue);
+        return EXIT_SUCCESS;
     }
-    mappedFileSize = size;
-    return data;
-
+    return EXIT_FAILURE;
 }
 
 int writeToSharedMemory(unsigned int value, unsigned int offset) {
-    int shm_id = shm_open(SHM_NAME, O_RDWR, 0644);
+    UNSIGNED_INT nr;
+    nr.value = value;
+    return writeStringToSHM(nr.byte, offset);
+}
+
+int getSharedMemory(char *key) {
+    int shm_id = shm_open(key, O_RDWR, 0644);
     if (shm_id < 0) {
         perror("Cannot open the shared memory at writeToSharedMemory()");
         exit(-1);
     }
-
-    struct stat st;
-    fstat(shm_id, &st);
-    int size = st.st_size;
-    if (size >= offset + sizeof(value)) {
-        UNSIGNED_INT nr;
-        nr.value = value;
-        lseek(shm_id, offset, SEEK_SET);
-        write(shm_id, nr.byte, sizeof(nr.byte));
-        return EXIT_SUCCESS;
-    }
-    return EXIT_FAILURE;
+    return shm_id;
 }
 
 int createSharedMemory(unsigned int bytes) {
@@ -320,10 +316,12 @@ int getType(char *request) {
 
     for (int i = 0; i < sizeof(REQUEST_NAME) / sizeof(REQUEST_NAME[0]); i++) {
         if (strcmp(request, REQUEST_NAME[i]) == 0) {
+            free(request);
             return i;
         }
     }
 
+    free(request);
     return REQ_NOT_FOUND;
 }
 
