@@ -1,0 +1,6 @@
+/.idea/
+/cmake-build-debug/
+/test_root/
+/a3
+/compile_log.txt
+/strace.log
