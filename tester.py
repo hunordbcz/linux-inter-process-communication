@@ -13,9 +13,8 @@ import threading
 A3_DATA = "eyJuYW1lIjogIkh1bm9yIERlYnJlY3plbmkiLCAidmFyaWFudCI6ICI4MjQxNyIsICJtYWdpY19zaXplIjogIjQiLCAibWFnaWMiOiAiNzl3cyIsICJoZWFkZXJfc2l6ZV9zaXplIjogIjIiLCAibm9fb2Zfc2VjdGlvbnNfc2l6ZSI6ICIxIiwgInNlY3Rfb2Zmc2V0X3NpemUiOiAiNCIsICJzZWN0X3NpemVfc2l6ZSI6ICI0IiwgImhlYWRlcl9wb3NfZW5kIjogZmFsc2UsICJmaWx0ZXJfc2l6ZV9ncmVhdGVyIjogZmFsc2UsICJmaWx0ZXJfc2l6ZV9zbWFsbGVyIjogdHJ1ZSwgImZpbHRlcl9uYW1lX3N0YXJ0c193aXRoIjogdHJ1ZSwgImZpbHRlcl9uYW1lX2VuZHNfd2l0aCI6IGZhbHNlLCAiZmlsdGVyX3Blcm1pc3Npb25zIjogZmFsc2UsICJmaWx0ZXJfaGFzX3Blcm1fZXhlY3V0ZSI6IGZhbHNlLCAiZmlsdGVyX2hhc19wZXJtX3dyaXRlIjogZmFsc2UsICJ2ZXJzaW9uX3NpemUiOiAiMiIsICJ2ZXJzaW9uX21pbiI6ICI4MyIsICJ2ZXJzaW9uX21heCI6ICIxNDEiLCAibnJfc2VjdF9taW4iOiAiNyIsICJucl9zZWN0X21heCI6ICIxMiIsICJzZWN0aW9uX25hbWVfc2l6ZSI6ICIxNiIsICJzZWN0aW9uX3R5cGVfc2l6ZSI6ICIyIiwgInNlY3Rpb25fdHlwZXMiOiBbIjE3IiwgIjE4Il0sICJwaXBlQ21kIjogIlJFUV9QSVBFXzgyNDE3IiwgInBpcGVSZXMiOiAiUkVTUF9QSVBFXzgyNDE3IiwgInNobV9uYW1lIjogIi9iYzNwY0E3IiwgInNobV9zaXplIjogIjI2OTk4NjAiLCAic2htX3JpZ2h0cyI6ICI2NjQiLCAic2htX3dyaXRlX29mZnNldCI6ICIxOTU5MyIsICJzaG1fd3JpdGVfdmFsdWUiOiAiMTE4ODczODEiLCAibG9naWNhbF9zcGFjZV9zZWN0aW9uX2FsaWdubWVudCI6ICIzMDcyIiwgImxvZ2ljYWxfc3BhY2Vfc2VjdGlvbl9hbGlnbm1lbnRfczEiOiAiMzA3MyIsICJsb2dpY2FsX3NwYWNlX3NlY3Rpb25fYWxpZ25tZW50X2RvdWJsZSI6ICI2MTQ0IiwgImxvZ2ljYWxfc3BhY2Vfc2VjdGlvbl9hbGlnbm1lbnRfdHJpcGxlIjogIjkyMTYiLCAiY291cnNlIjogIm9zIn0="
 A3_PROG = "a3"
 
-VERBOSE = True
+VERBOSE = False
 TIME_LIMIT = 3
-
 
 def compile():
     if os.path.isfile(A3_PROG):
@@ -34,7 +33,6 @@ def compile():
         return 2
     else:
         return 0
-
 
 class Tester(threading.Thread):
     MAX_SCORE = 10
@@ -134,7 +132,6 @@ class Tester(threading.Thread):
             return None
         try:
             size = self.fdRes.read(1)
-
             if len(size) != 1:
                 return None
             size = struct.unpack("B", size)[0]
@@ -481,6 +478,7 @@ class Tester(threading.Thread):
                 score += 2
         return score
 
+
     def run(self):
         if os.path.exists(self.data["pipeCmd"]):
             os.remove(self.data["pipeCmd"])
@@ -496,7 +494,7 @@ class Tester(threading.Thread):
         self.fdCmd = open(self.data["pipeCmd"], "wb")
         self.fdRes = open(self.data["pipeRes"], "rb")
 
-        # wait for the CONNECT message
+        #wait for the CONNECT message
         s = self.readString()
         if s == b"CONNECT":
             self.score += 1
@@ -524,7 +522,7 @@ class Tester(threading.Thread):
             if self.p is not None:
                 self.p.kill()
                 timeout = True
-            # self.join()
+            #self.join()
         if timeout:
             print("\t\033[1;31mTIME LIMIT EXCEEDED\033[0m")
             return 0, self.maxScore
@@ -533,14 +531,12 @@ class Tester(threading.Thread):
                 self.score *= 0.7
         return self.score, self.maxScore
 
-
 def genRandomName(length=0):
     symbols = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijlmnopqrstuvwxyz1234567890"
     if length == 0:
         length = random.randint(4, 10)
     name = [symbols[random.randint(0, len(symbols) - 1)] for _i in range(length)]
     return "".join(name).encode()
-
 
 def genSectionFile(path, data):
     info = {}
@@ -609,7 +605,6 @@ def genSectionFile(path, data):
     perm = (4 + random.randint(0, 3)) * 64 + random.randint(0, 7) * 8 + random.randint(0, 7)
     os.chmod(path, perm)
 
-
 def getSectionsTable(data, fpath):
     if not os.path.isfile(fpath):
         return None
@@ -666,7 +661,6 @@ def getSectionsTable(data, fpath):
         size = struct.unpack("I", hdr[i * sectSize + ns + ts + 4:i * sectSize + ns + ts + 8])[0]
         sections.append((name, type, offset, size))
     return sections
-
 
 def loadTests(data):
     random.seed(data["name"])
