@@ -318,6 +318,11 @@ int createSharedMemory(unsigned int bytes) {
 }
 
 void writeNumberPipe(unsigned int number) {
+    if (pipeWriteFD == -1) {
+        perror("Pipe is not open");
+        exit(EXIT_FAILURE);
+    }
+
     write(pipeWriteFD, &number, sizeof(number));
 }
 
@@ -343,12 +348,22 @@ int getType(char *request) {
 }
 
 void writeStringPipe(char *str) {
+    if (pipeWriteFD == -1) {
+        perror("Pipe is not open");
+        exit(EXIT_FAILURE);
+    }
+
     u_int8_t sizeMessage = strlen(str);
     write(pipeWriteFD, &sizeMessage, sizeof(sizeMessage));
     write(pipeWriteFD, str, sizeMessage);
 }
 
 char *readStringPipe() {
+    if (pipeReadFD == -1) {
+        perror("Pipe is not open");
+        exit(EXIT_FAILURE);
+    }
+
     u_int8_t messageSize;
     read(pipeReadFD, &messageSize, sizeof(messageSize));
 
@@ -359,6 +374,11 @@ char *readStringPipe() {
 }
 
 unsigned int readNumberPipe() {
+    if (pipeReadFD == -1) {
+        perror("Pipe is not open");
+        exit(EXIT_FAILURE);
+    }
+
     unsigned int value;
     read(pipeReadFD, &value, sizeof(value));
 
