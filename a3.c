@@ -11,9 +11,10 @@
 #define BODY_HEADER_SIZE 9
 #define SECTION_HEADER_SIZE 26
 #define LOGICAL_OFFSET_ALIGNMENT 3072
+#define RESPONSE_PIPE_KEY "RESP_PIPE_82417"
+#define REQUEST_PIPE_KEY "REQ_PIPE_82417"
 
 typedef enum {
-    REQ_EXIT,
     REQ_PING,
     REQ_CREATE_SHM,
     REQ_WRITE_TO_SHM,
@@ -21,19 +22,10 @@ typedef enum {
     REQ_READ_FROM_FILE_OFFSET,
     REQ_READ_FROM_FILE_SECTION,
     REQ_READ_FROM_LOGICAL_SPACE_OFFSET,
+    REQ_EXIT,
 
     REQ_NOT_FOUND
 } REQUEST_ENUM;
-
-typedef union {
-    u_int32_t value;
-    unsigned char byte[4];
-} UNSIGNED_INT;
-
-typedef union {
-    u_int8_t value;
-    unsigned char byte[1];
-} BYTE;
 
 typedef struct {
     unsigned int offset;
@@ -45,8 +37,9 @@ typedef struct {
     u_long size;
 } MAPPED_FILE, *pMAPPED_FILE;
 
-int pipeReadFD, pipeWriteFD;
-pMAPPED_FILE pMappedFile = NULL;
+int pipeReadFD = -1, pipeWriteFD = -1;
+pMAPPED_FILE pInput = NULL;
+pMAPPED_FILE pMappedSHM = NULL;
 
 void makePipeBasedConnection(char *response, char *request);
 
@@ -64,34 +57,34 @@ unsigned int readNumberPipe();
 
 int createSharedMemory(unsigned int bytes);
 
-int writeToSharedMemory(unsigned int value, unsigned int offset);
+int writeNumberToSHM(unsigned int value, unsigned int offset);
 
 int mapFile(char *path);
 
-unsigned char *readFromFileOffset(unsigned int noOfBytes, unsigned int offset);
+char *readFromFileOffset(unsigned int nrBytes, unsigned int offset);
 
-unsigned char *readFromSection(unsigned int nrOfBytes, unsigned int offset, unsigned int sectionNr);
+char *readFromSection(unsigned int nrBytes, unsigned int offset, unsigned int sectionNr);
 
-unsigned char *readFromLogicalSpaceOffset(unsigned int nrOfBytes, unsigned int logicalOffset);
+char *readFromLogicalSpaceOffset(unsigned int nrBytes, unsigned int logicalOffset);
 
 SECTION getSection(unsigned int nr);
 
-int writeStringToSHM(unsigned char *value, unsigned int offset);
-
-int getSharedMemory(char *key);
+int writeStringToSHM(char *value, unsigned int offset);
 
 int getFileDescriptor(char *path);
 
+void cleanUp();
+
 int main() {
-    makePipeBasedConnection("RESP_PIPE_82417", "REQ_PIPE_82417");
+    makePipeBasedConnection(RESPONSE_PIPE_KEY, REQUEST_PIPE_KEY);
     while (processRequest(readStringPipe()) != REQ_EXIT);
     return 0;
 }
 
 int processRequest(char *request) {
-    int type = getType(request);
-    unsigned char *result = NULL;
-    switch (type) {
+    int requestType = getType(request);
+    char *result = NULL;
+    switch (requestType) {
         case REQ_PING:
             writeStringPipe("PING");
             writeStringPipe("PONG");
@@ -107,7 +100,7 @@ int processRequest(char *request) {
             break;
         case REQ_WRITE_TO_SHM:
             writeStringPipe("WRITE_TO_SHM");
-            if (writeToSharedMemory(readNumberPipe(), readNumberPipe()) == EXIT_FAILURE) {
+            if (writeNumberToSHM(readNumberPipe(), readNumberPipe()) == EXIT_FAILURE) {
                 writeStringPipe("ERROR");
             } else {
                 writeStringPipe("SUCCESS");
@@ -158,29 +151,46 @@ int processRequest(char *request) {
             }
             break;
         case REQ_NOT_FOUND:
-            if (pMappedFile != NULL) {
-                free(pMappedFile);
-            }
+            cleanUp();
+            free(request);
 
             perror("Request not found in processRequest()");
-            exit(-1);
+            exit(EXIT_FAILURE);
         default:
-            if (pMappedFile != NULL) {
-                free(pMappedFile);
-            }
-            close(pipeReadFD);
-            close(pipeWriteFD);
+            cleanUp();
             return REQ_EXIT;
     }
-    return 1;
+
+    free(request);
+    return requestType;
 }
 
-unsigned char *readFromLogicalSpaceOffset(unsigned int nrOfBytes, unsigned int logicalOffset) {
-    BYTE noOfSections;
-    memcpy(noOfSections.byte, pMappedFile->pointer + 8, 1);
+void cleanUp() {
+    if (pInput != NULL) {
+        munmap(pInput->pointer, pInput->size);
+        free(pInput);
+    }
+
+    if (pMappedSHM != NULL) {
+        munmap(pMappedSHM->pointer, pMappedSHM->size);
+        free(pMappedSHM);
+    }
+
+    if (pipeReadFD != -1) {
+        close(pipeReadFD);
+    }
+
+    if (pipeWriteFD != -1) {
+        close(pipeWriteFD);
+    }
+}
+
+char *readFromLogicalSpaceOffset(unsigned int nrBytes, unsigned int logicalOffset) {
+    u_int8_t nrSections;
+    memcpy(&nrSections, pInput->pointer + 8, sizeof(nrSections));
     unsigned int currentOffset = 0;
 
-    for (int i = 0; i < noOfSections.value; i++) {
+    for (int i = 0; i < nrSections; i++) {
         SECTION section = getSection(i);
         if (section.size + currentOffset < logicalOffset) {
             currentOffset += section.size;
@@ -188,9 +198,9 @@ unsigned char *readFromLogicalSpaceOffset(unsigned int nrOfBytes, unsigned int l
                 currentOffset += LOGICAL_OFFSET_ALIGNMENT - currentOffset % LOGICAL_OFFSET_ALIGNMENT;
             }
         } else {
-            unsigned char *response = (unsigned char *) malloc(sizeof(char));
-            memcpy(response, pMappedFile->pointer + section.offset + (logicalOffset - currentOffset), nrOfBytes);
-            response[nrOfBytes] = '\0';
+            char *response = (char *) malloc(sizeof(char));
+            memcpy(response, pInput->pointer + section.offset + (logicalOffset - currentOffset), nrBytes);
+            response[nrBytes] = '\0';
 
             return response;
         }
@@ -200,42 +210,38 @@ unsigned char *readFromLogicalSpaceOffset(unsigned int nrOfBytes, unsigned int l
 
 SECTION getSection(unsigned int nr) {
     SECTION result;
-    UNSIGNED_INT size;
-    UNSIGNED_INT offset;
     int sectionOffsetPos = BODY_HEADER_SIZE + nr * SECTION_HEADER_SIZE + 18;
     int sectionSizePos = BODY_HEADER_SIZE + nr * SECTION_HEADER_SIZE + 22;
 
-    memcpy(size.byte, pMappedFile->pointer + sectionSizePos, 4);
-    memcpy(offset.byte, pMappedFile->pointer + sectionOffsetPos, 4);
+    memcpy(&result.size, pInput->pointer + sectionSizePos, sizeof(result.size));
+    memcpy(&result.offset, pInput->pointer + sectionOffsetPos, sizeof(result.offset));
 
-    result.size = size.value;
-    result.offset = offset.value;
     return result;
 }
 
-unsigned char *readFromSection(unsigned int nrOfBytes, unsigned int offset, unsigned int sectionNr) {
-    BYTE noOfSections;
-    memcpy(noOfSections.byte, pMappedFile->pointer + 8, 1);
-    if (noOfSections.value < sectionNr) {
+char *readFromSection(unsigned int nrBytes, unsigned int offset, unsigned int sectionNr) {
+    u_int8_t noOfSections;
+    memcpy(&noOfSections, pInput->pointer + 8, sizeof(noOfSections));
+    if (noOfSections < sectionNr) {
         return NULL;
     }
 
     SECTION section = getSection(sectionNr - 1);
-    unsigned char *response = (unsigned char *) malloc(sizeof(char));
-    memcpy(response, pMappedFile->pointer + section.offset + offset, nrOfBytes);
-    response[nrOfBytes] = '\0';
+    char *response = (char *) malloc(sizeof(char));
+    memcpy(response, pInput->pointer + section.offset + offset, nrBytes);
+    response[nrBytes] = '\0';
 
     return response;
 }
 
-unsigned char *readFromFileOffset(unsigned int noOfBytes, unsigned int offset) {
-    if (pMappedFile->size < (offset + noOfBytes)) {
+char *readFromFileOffset(unsigned int nrBytes, unsigned int offset) {
+    if (pInput->size < (offset + nrBytes)) {
         return NULL;
     }
 
-    unsigned char *response = (unsigned char *) malloc(sizeof(char));
-    memcpy(response, pMappedFile->pointer + offset, noOfBytes);
-    response[noOfBytes] = '\0';
+    char *response = (char *) malloc(sizeof(char));
+    memcpy(response, pInput->pointer + offset, nrBytes);
+    response[nrBytes] = '\0';
 
     return response;
 }
@@ -247,7 +253,6 @@ int mapFile(char *path) {
     }
 
     int size = lseek(fileDescriptor, 0, SEEK_END);
-    lseek(fileDescriptor, 0, SEEK_SET);
 
     char *data = NULL;
     data = (char *) mmap(NULL, size, PROT_READ, MAP_SHARED, fileDescriptor, 0);
@@ -255,9 +260,11 @@ int mapFile(char *path) {
         return EXIT_FAILURE;
     }
 
-    pMappedFile = (pMAPPED_FILE) malloc(sizeof(MAPPED_FILE));
-    pMappedFile->size = size;
-    pMappedFile->pointer = data;
+    if (pInput == NULL) {
+        pInput = (pMAPPED_FILE) malloc(sizeof(MAPPED_FILE));
+    }
+    pInput->size = size;
+    pInput->pointer = data;
     return EXIT_SUCCESS;
 }
 
@@ -274,86 +281,76 @@ int getFileDescriptor(char *path) {
     return fileD;
 }
 
-int writeStringToSHM(unsigned char *value, unsigned int offset) {
-    int shm_id = getSharedMemory(SHM_NAME);
-
-    int sizeSHM = lseek(shm_id, 0, SEEK_END);
-    int sizeValue = strlen((char *) value);
-    if (sizeSHM >= offset + sizeValue) {
-
-        lseek(shm_id, offset, SEEK_SET);
-        write(shm_id, value, sizeValue);
-        return EXIT_SUCCESS;
+int writeStringToSHM(char *value, unsigned int offset) {
+    if (pMappedSHM == NULL) {
+        return EXIT_FAILURE;
     }
-    return EXIT_FAILURE;
+
+    int sizeValue = strlen(value);
+    if (pMappedSHM->size < offset + sizeValue) {
+        return EXIT_FAILURE;
+    }
+
+    memcpy(pMappedSHM->pointer + offset, value, sizeValue);
+    return EXIT_SUCCESS;
 }
 
-int writeToSharedMemory(unsigned int value, unsigned int offset) {
-    UNSIGNED_INT nr;
-    nr.value = value;
-    return writeStringToSHM(nr.byte, offset);
-}
-
-int getSharedMemory(char *key) {
-    int shm_id = shm_open(key, O_RDWR, 0644);
-    if (shm_id < 0) {
-        perror("Cannot open the shared memory at writeToSharedMemory()");
-        exit(-1);
-    }
-    return shm_id;
+int writeNumberToSHM(unsigned int value, unsigned int offset) {
+    return writeStringToSHM((char *) &value, offset);
 }
 
 int createSharedMemory(unsigned int bytes) {
     shm_unlink(SHM_NAME);
-    int shm_id = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0664);
-    if (shm_id < 0) {
+    int shmFD = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0664);
+    if (shmFD < 0) {
         return EXIT_FAILURE;
     }
-    ftruncate(shm_id, bytes);
+    ftruncate(shmFD, bytes);
+    char *data = (char *) mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, shmFD, 0);
+
+    if (pMappedSHM == NULL) {
+        pMappedSHM = (pMAPPED_FILE) malloc(sizeof(MAPPED_FILE));
+    }
+    pMappedSHM->size = bytes;
+    pMappedSHM->pointer = data;
+
     return EXIT_SUCCESS;
 }
 
 void writeNumberPipe(unsigned int number) {
-    UNSIGNED_INT nr;
-    nr.value = number;
-    write(pipeWriteFD, nr.byte, sizeof(nr.byte));
+    write(pipeWriteFD, &number, sizeof(number));
 }
 
 int getType(char *request) {
     const char *REQUEST_NAME[] = {
-            [REQ_EXIT] = "EXIT",
             [REQ_PING] = "PING",
             [REQ_CREATE_SHM] ="CREATE_SHM",
             [REQ_WRITE_TO_SHM] ="WRITE_TO_SHM",
             [REQ_MAP_FILE] ="MAP_FILE",
             [REQ_READ_FROM_FILE_OFFSET] ="READ_FROM_FILE_OFFSET",
             [REQ_READ_FROM_FILE_SECTION] ="READ_FROM_FILE_SECTION",
-            [REQ_READ_FROM_LOGICAL_SPACE_OFFSET] ="READ_FROM_LOGICAL_SPACE_OFFSET"
+            [REQ_READ_FROM_LOGICAL_SPACE_OFFSET] ="READ_FROM_LOGICAL_SPACE_OFFSET",
+            [REQ_EXIT] = "EXIT",
     };
 
     for (int i = 0; i < sizeof(REQUEST_NAME) / sizeof(REQUEST_NAME[0]); i++) {
         if (strcmp(request, REQUEST_NAME[i]) == 0) {
-            free(request);
             return i;
         }
     }
 
-    free(request);
     return REQ_NOT_FOUND;
 }
 
 void writeStringPipe(char *str) {
-    unsigned int sizeMessage = strlen(str);
-    char size[1];
-    size[0] = (char) sizeMessage;
-    write(pipeWriteFD, size, 1);
+    u_int8_t sizeMessage = strlen(str);
+    write(pipeWriteFD, &sizeMessage, sizeof(sizeMessage));
     write(pipeWriteFD, str, sizeMessage);
 }
 
 char *readStringPipe() {
-    char size[2];
-    read(pipeReadFD, size, 1);
-    unsigned int messageSize = size[0];
+    u_int8_t messageSize;
+    read(pipeReadFD, &messageSize, sizeof(messageSize));
 
     char *buff = (char *) malloc(sizeof(char));
     read(pipeReadFD, buff, messageSize);
@@ -362,16 +359,16 @@ char *readStringPipe() {
 }
 
 unsigned int readNumberPipe() {
-    UNSIGNED_INT nr;
-    read(pipeReadFD, nr.byte, 4);
+    unsigned int value;
+    read(pipeReadFD, &value, sizeof(value));
 
-    return nr.value;
+    return value;
 }
 
 void makePipeBasedConnection(char *response, char *request) {
     if (mknod(response, S_IFIFO | 0640, 0) < 0) {
         perror("Error creating FIFO");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
     pipeReadFD = open(request, O_RDONLY);
     pipeWriteFD = open(response, O_WRONLY);
