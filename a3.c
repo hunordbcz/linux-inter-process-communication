@@ -27,6 +27,10 @@ typedef enum {
     REQ_NOT_FOUND
 } REQUEST_ENUM;
 
+typedef enum {
+    FALSE, TRUE
+} BOOLEANS;
+
 typedef struct {
     unsigned int offset;
     unsigned int size;
@@ -75,9 +79,13 @@ int getFileDescriptor(char *path);
 
 void cleanUp();
 
+void writeStringPipeUtil(char *obj, int isNumber);
+
 int main() {
     makePipeBasedConnection(RESPONSE_PIPE_KEY, REQUEST_PIPE_KEY);
     while (processRequest(readStringPipe()) != REQ_EXIT);
+
+    cleanUp();
     return 0;
 }
 
@@ -157,7 +165,6 @@ int processRequest(char *request) {
             perror("Request not found in processRequest()");
             exit(EXIT_FAILURE);
         default:
-            cleanUp();
             return REQ_EXIT;
     }
 
@@ -166,14 +173,9 @@ int processRequest(char *request) {
 }
 
 void cleanUp() {
-    if (pInput != NULL) {
+    if (pInput != NULL && pInput->pointer != NULL) {
         munmap(pInput->pointer, pInput->size);
         free(pInput);
-    }
-
-    if (pMappedSHM != NULL) {
-        munmap(pMappedSHM->pointer, pMappedSHM->size);
-        free(pMappedSHM);
     }
 
     if (pipeReadFD != -1) {
@@ -269,16 +271,11 @@ int mapFile(char *path) {
 }
 
 int getFileDescriptor(char *path) {
-    int fileD = -1;
-
     if (access(path, R_OK) == -1) {
         chmod(path, S_IRUSR | S_IRGRP | S_IROTH);
     }
-    if ((fileD = open(path, O_RDONLY, 0644)) < 0) {
-        return -1;
-    }
 
-    return fileD;
+    return open(path, O_RDONLY, 0644);
 }
 
 int writeStringToSHM(char *value, unsigned int offset) {
@@ -301,29 +298,24 @@ int writeNumberToSHM(unsigned int value, unsigned int offset) {
 
 int createSharedMemory(unsigned int bytes) {
     shm_unlink(SHM_NAME);
-    int shmFD = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0664);
-    if (shmFD < 0) {
+    int shmFD;
+    if ((shmFD = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0664)) < 0) {
         return EXIT_FAILURE;
     }
     ftruncate(shmFD, bytes);
-    char *data = (char *) mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, shmFD, 0);
+
+    char *data = (char *) mmap(NULL, bytes, PROT_WRITE, MAP_SHARED, shmFD, 0);
+    if (data == MAP_FAILED) {
+        perror("Map failed at createSharedMemory()");
+        exit(EXIT_FAILURE);
+    }
 
     if (pMappedSHM == NULL) {
         pMappedSHM = (pMAPPED_FILE) malloc(sizeof(MAPPED_FILE));
     }
     pMappedSHM->size = bytes;
     pMappedSHM->pointer = data;
-
     return EXIT_SUCCESS;
-}
-
-void writeNumberPipe(unsigned int number) {
-    if (pipeWriteFD == -1) {
-        perror("Pipe is not open");
-        exit(EXIT_FAILURE);
-    }
-
-    write(pipeWriteFD, &number, sizeof(number));
 }
 
 int getType(char *request) {
@@ -347,20 +339,40 @@ int getType(char *request) {
     return REQ_NOT_FOUND;
 }
 
+void writeNumberPipe(unsigned int number) {
+    writeStringPipeUtil((char *) &number, TRUE);
+}
+
 void writeStringPipe(char *str) {
-    if (pipeWriteFD == -1) {
-        perror("Pipe is not open");
+    writeStringPipeUtil(str, FALSE);
+}
+
+void writeStringPipeUtil(char *obj, int isNumber) {
+    u_int8_t sizeObj;
+
+    if (!isNumber) {
+        sizeObj = strlen(obj);
+
+        if (write(pipeWriteFD, &sizeObj, sizeof(sizeObj)) < 0) {
+            perror("Couldn't write size into pipe at writeStringPipe()");
+            exit(EXIT_FAILURE);
+        }
+    } else if (isNumber == TRUE) {
+        sizeObj = 4;
+    } else {
+        perror("Invalid argument isNumber at writeStringPipeUtil()");
         exit(EXIT_FAILURE);
     }
 
-    u_int8_t sizeMessage = strlen(str);
-    write(pipeWriteFD, &sizeMessage, sizeof(sizeMessage));
-    write(pipeWriteFD, str, sizeMessage);
+    if (write(pipeWriteFD, obj, sizeObj) < 0) {
+        perror("Couldn't write obj into pipe at writeStringPipe()");
+        exit(EXIT_FAILURE);
+    }
 }
 
 char *readStringPipe() {
     if (pipeReadFD == -1) {
-        perror("Pipe is not open");
+        perror("Pipe is not open at readStringPipe()");
         exit(EXIT_FAILURE);
     }
 
@@ -375,7 +387,7 @@ char *readStringPipe() {
 
 unsigned int readNumberPipe() {
     if (pipeReadFD == -1) {
-        perror("Pipe is not open");
+        perror("Pipe is not open at readNumberPipe()");
         exit(EXIT_FAILURE);
     }
 
@@ -387,11 +399,16 @@ unsigned int readNumberPipe() {
 
 void makePipeBasedConnection(char *response, char *request) {
     if (mknod(response, S_IFIFO | 0640, 0) < 0) {
-        perror("Error creating FIFO");
+        perror("Couldn't create pipe at makePipeBasedConnection()");
         exit(EXIT_FAILURE);
     }
     pipeReadFD = open(request, O_RDONLY);
     pipeWriteFD = open(response, O_WRONLY);
+
+    if (pipeReadFD == -1 || pipeWriteFD == -1) {
+        perror("Couldn't open pipes at makePipeBasedConnection()");
+        exit(EXIT_FAILURE);
+    }
 
     writeStringPipe("CONNECT");
     printf("SUCCESS\n");
